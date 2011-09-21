@@ -1,10 +1,10 @@
 package WWW::CPANRatings;
 use strict;
 use warnings;
-our $VERSION = '0.02';
-
+our $VERSION = '0.03';
+use utf8;
 use List::Util qw(sum);
-use LWP::Simple;
+use LWP::UserAgent;
 use DateTime::Format::DateParse;
 use HTML::TokeParser::Simple;
 use URI;
@@ -16,9 +16,25 @@ use feature 'say';
 sub new { 
     my $class = shift;
     my $args = shift || {};
-    bless $args,$class;
+    my $self = bless $args,$class;
+    $self->setup_request(sub{
+        my $url = shift;
+        my $ua = LWP::UserAgent->new;
+        my $response = $ua->get( $url );
+        return $response->decoded_content;
+    });
+    return $self;
 }
 
+sub setup_request {
+    my ($self,$cb) = @_;
+    $self->{requester} = $cb;
+}
+
+sub request {
+    my ($self,$url) = @_;
+    return $self->{requester}->( $url );
+}
 
 sub fetch_ratings {
     my $self = shift;
@@ -37,7 +53,7 @@ sub fetch_ratings {
     }
 
     unless ( $text ) {
-        $text = get('http://cpanratings.perl.org/csv/all_ratings.csv');
+        $text = $self->request('http://cpanratings.perl.org/csv/all_ratings.csv');
     }
 
     my @lines = split /\n/,$text;
@@ -82,7 +98,8 @@ sub get_reviews {
     $distname =~ s/::/-/g;
     my $base_url = "http://cpanratings.perl.org/dist/";
     my $url = $base_url . $distname;
-    my $content = get($url);
+    my $content = $self->request($url);
+    return unless $content;
     return unless $content =~ /$modname reviews/;
     my $result = $self->parse_review_page($content);
     return @{ $result->{reviews} };
@@ -96,24 +113,29 @@ sub get_reviews {
 #                   'body' => ' Moose got me laid. Could you ask anything more of a CPAN module? ',
 #                   'user_link' => bless( do{\(my $o = 'http://cpanratings.perl.org/user/funguy')}, 'URI::http' ),
 #                   'attrs' => 'Fun Guy - 2011-04-12T14:30:46 ',
-#                   'dist_name' => ' Moose',
 #                   'user' => 'Fun Guy',
+#                   'dist' => ' Moose',
 #                   'dist_link' => bless( do{\(my $o = 'http://search.cpan.org/dist/Moose/')}, 'URI::http' )
 #                 },
 
-sub parse_review_page {
-    my ($self,$content) = @_;
 
-    my $rating_scraper = scraper {
+
+sub rating_scraper { 
+    my $self = shift;
+    return scraper {
         process '.review' => 'reviews[]' => scraper {
             process '.review_header a', 
                     dist_link => '@href',
-                    dist_name => 'TEXT';
+                    dist => 'TEXT';
 
             process '.review_header',
                     header => 'TEXT';
 
+            process '.review_header img',
+                    ratings => '@alt';
+
             process '.review_text', body => 'TEXT';
+
             process '.review_attribution' ,
                 'attrs' => 'TEXT';
             process '.review_attribution a' , 
@@ -121,24 +143,46 @@ sub parse_review_page {
                 'user_link' => '@href';
         };
     };
-    my $res = $rating_scraper->scrape( URI->new("http://cpanratings.perl.org/dist/Moose") );
+}
+
+sub parse_review_page {
+    my ($self,$content) = @_;
+
+    my $rating_scraper = $self->rating_scraper;
+    my $res = $rating_scraper->scrape( $content );
 
     # post process
 
     for my $review ( @{ $res->{reviews} } ) {
         if( $review->{header} =~ m{^\s*([a-zA-Z:]+)\s+\(([0-9.]+)\)\s*$} ) {
             $review->{version} = $2;
-            say $review->{version};
         }
 
-        if( $review->{attrs} =~ m{\s([0-9-T:]+)\s*$} ) {
-            $review->{timestamp} = 
+        $review->{dist} =~ s{^\s*}{};
+        $review->{dist} =~ s{\s*$}{};
+
+        if( $review->{attrs} =~ m{([0-9-T:]+)\s*$} ) {
+            $review->{created_on} = 
                 DateTime::Format::DateParse->parse_datetime( $1 );
         }
+
+        delete $review->{attrs};
     }
     return $res;
 }
 
+
+sub get_all_reviews {
+    my $self = shift;
+    my $all_ratings = $self->rating_data;
+    while( my( $distname,$ratings) = each %$all_ratings ) {
+        # $ratings->{review_cnt};
+        # $ratings->{dist};
+        # $ratings->{rating};
+        $ratings->{reviews} = [ $self->get_reviews( $ratings->{dist} ) ];
+    }
+    return $all_ratings;
+}
 
 1;
 __END__
@@ -159,13 +203,17 @@ WWW::CPANRatings - parsing CPANRatings data
 
     my @reviews = $r->get_reviews( 'Moose' );  # parse review text from cpanratings.perl.org.
 
+
+
+
     for my $r ( @reviews ) {
-        $r->{dist_name};
+        $r->{dist};
         $r->{dist_link};
         $r->{version}
         $r->{user};
         $r->{user_link};
-        $r->{timestamp};  # DateTime object.
+        $r->{created_on};  # DateTime object.
+        $r->{ratings};
     }
 
 =head1 DESCRIPTION
@@ -187,6 +235,10 @@ Get rating data of a distribution
 =head2 Reviews | Array = $r->get_reviews( DistName | String )
 
 Get distribution reviews (including text, user, timestamp)
+
+=head2 $r->get_all_reviews
+
+Get reviews from all distributions.
 
 =head1 AUTHOR
 

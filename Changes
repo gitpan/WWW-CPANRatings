@@ -1,5 +1,9 @@
 Revision history for Perl extension WWW::CPANRatings
 
+0.03    四  9/22 02:07:50 2011
+        - Minor Fixes
+        - use utf8
+
 0.02    三  9/21 13:04:03 2011
         - Remove prepare method
         - Make get_ratings accessor lazy building.
